@@ -62,8 +62,6 @@ services:
     image: ghcr.io/greppilot/greppilot-web:latest
     ports:
       - "3000:3000"
-    environment:
-      NEXT_PUBLIC_API_URL: http://api:3002
     depends_on:
       - api
     restart: unless-stopped
@@ -240,6 +238,10 @@ cmd_stop() {
 cmd_update() {
   require_install
   echo -e "${CYAN}Updating Greppilot...${NC}"
+
+  printf "  Refreshing compose config..."
+  write_compose
+  echo -e " ${GREEN}✓${NC}"
 
   printf "  Pulling latest images..."
   dc pull -q || { echo -e " ${RED}✗ Failed to pull images.${NC}"; echo "  Run 'docker compose pull' manually for details."; exit 1; }
