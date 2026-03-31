@@ -1,0 +1,4 @@
+name = "get"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+account_id = "8f639d8d17efd54ac64bb61354593949"

@@ -1,0 +1,19 @@
+name: Deploy get.greppilot.com worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - workers/get-greppilot-com/**
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          workingDirectory: workers/get-greppilot-com
