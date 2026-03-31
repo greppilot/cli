@@ -151,9 +151,17 @@ cmd_install() {
   # [3/4] App URL
   echo ""
   echo -e "[3/4] App URL"
-  printf "  Public URL (e.g. https://analytics.company.com): "
+  printf "  Public URL (e.g. https://analytics.company.com, or press Enter for localhost): "
   read -r APP_URL
   APP_URL="${APP_URL%/}"
+  # Normalize bare "localhost" → http://localhost:3000
+  if [[ -z "$APP_URL" || "$APP_URL" == "localhost" ]]; then
+    APP_URL="http://localhost:3000"
+  fi
+  # Prepend http:// if no scheme given
+  if [[ "$APP_URL" != http://* && "$APP_URL" != https://* ]]; then
+    APP_URL="https://${APP_URL}"
+  fi
 
   # [4/4] Starting up
   echo ""
