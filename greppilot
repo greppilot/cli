@@ -167,6 +167,12 @@ cmd_install() {
   echo ""
   echo -e "[4/4] Starting up"
 
+  # Tear down any previous install (volumes included) so postgres re-initializes
+  # with the freshly generated credentials. Safe to run even on first install.
+  if [ -f "$COMPOSE_FILE" ]; then
+    dc down -v --remove-orphans 2>/dev/null || true
+  fi
+
   ENCRYPTION_KEY=$(openssl rand -hex 32)
   JWT_SECRET=$(openssl rand -hex 32)
   POSTGRES_PASSWORD=$(openssl rand -hex 16)
