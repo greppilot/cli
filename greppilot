@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+# ── Config directory ──────────────────────────────────────────────────────────
+
+detect_config_dir() {
+  if [[ "$(uname)" == "Darwin" ]] || [[ "${USER:-root}" != "root" ]]; then
+    echo "$HOME/.greppilot"
+  else
+    echo "/opt/greppilot"
+  fi
+}
+
+CONFIG_DIR="$(detect_config_dir)"
+ENV_FILE="$CONFIG_DIR/.env"
+COMPOSE_FILE="$CONFIG_DIR/docker-compose.yml"
+
+# ── Embedded docker-compose.yml ───────────────────────────────────────────────
+
+write_compose() {
+  cat > "$COMPOSE_FILE" <<'COMPOSE_EOF'
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: greppilot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: greppilot
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U greppilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  api:
+    image: ghcr.io/greppilot/greppilot-api:latest
+    ports:
+      - "3002:3002"
+    environment:
+      DATABASE_URL: postgresql://greppilot:${POSTGRES_PASSWORD}@postgres:5432/greppilot
+      JWT_SECRET: ${JWT_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      PORT: 3002
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    image: ghcr.io/greppilot/greppilot-web:latest
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://api:3002
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+COMPOSE_EOF
+}
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+require_install() {
+  if [ ! -f "$ENV_FILE" ] || [ ! -f "$COMPOSE_FILE" ]; then
+    echo -e "${RED}Not configured. Run: greppilot install${NC}"
+    exit 1
+  fi
+}
+
+dc() {
+  docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"
+}
+
+# ── install ───────────────────────────────────────────────────────────────────
+
+cmd_install() {
+  if ! docker compose version &>/dev/null 2>&1; then
+    echo -e "${RED}Docker with compose plugin is required.${NC}"
+    echo "See: https://docs.docker.com/compose/install/"
+    exit 1
+  fi
+
+  mkdir -p "$CONFIG_DIR"
+
+  if [ -f "$ENV_FILE" ]; then
+    echo -e "${YELLOW}Already configured.${NC}"
+    printf "Re-run setup? (y/N): "
+    read -r RERUN
+    [[ "$RERUN" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+  fi
+
+  echo ""
+  echo -e "${CYAN}========================================${NC}"
+  echo -e "${CYAN}  Greppilot — Setup${NC}"
+  echo -e "${CYAN}========================================${NC}"
+  echo ""
+
+  # [1/4] Admin account
+  echo -e "[1/4] Admin account"
+  while true; do
+    printf "  Email: "
+    read -r ADMIN_EMAIL
+    [[ "$ADMIN_EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]] && break
+    echo -e "  ${RED}Invalid email format.${NC}"
+  done
+
+  while true; do
+    printf "  Password (min 8 chars): "
+    read -r -s ADMIN_PASSWORD; echo ""
+    [ ${#ADMIN_PASSWORD} -ge 8 ] && break
+    echo -e "  ${RED}Password must be at least 8 characters.${NC}"
+  done
+
+  # [2/4] License key
+  echo ""
+  echo -e "[2/4] License key"
+  printf "  Key (GPL-XXXX-XXXX-XXXX): "
+  read -r LICENSE_KEY
+  printf "  Validating..."
+  HOSTNAME_VAL="$(hostname)"
+  LICENSE_BODY=$(printf '{"key":"%s","hostname":"%s"}' "$LICENSE_KEY" "$HOSTNAME_VAL")
+  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X POST https://license.greppilot.com/validate \
+    -H "Content-Type: application/json" \
+    -d "$LICENSE_BODY" 2>/dev/null || echo "000")
+  if [ "$HTTP_CODE" != "200" ]; then
+    echo -e " ${RED}✗ Invalid or expired license key.${NC}"
+    exit 1
+  fi
+  echo -e " ${GREEN}✓ License validated${NC}"
+
+  # [3/4] App URL
+  echo ""
+  echo -e "[3/4] App URL"
+  printf "  Public URL (e.g. https://analytics.company.com): "
+  read -r APP_URL
+  APP_URL="${APP_URL%/}"
+
+  # [4/4] Starting up
+  echo ""
+  echo -e "[4/4] Starting up"
+
+  ENCRYPTION_KEY=$(openssl rand -hex 32)
+  JWT_SECRET=$(openssl rand -hex 32)
+  POSTGRES_PASSWORD=$(openssl rand -hex 16)
+
+  (umask 077 && cat > "$ENV_FILE" <<EOF
+ADMIN_EMAIL=$ADMIN_EMAIL
+ADMIN_PASSWORD=$ADMIN_PASSWORD
+LICENSE_KEY=$LICENSE_KEY
+APP_URL=$APP_URL
+JWT_SECRET=$JWT_SECRET
+ENCRYPTION_KEY=$ENCRYPTION_KEY
+POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+EOF
+)
+  echo -e "  ${GREEN}✓${NC} Config written to $CONFIG_DIR/"
+
+  write_compose
+
+  printf "  Pulling Docker images..."
+  dc pull -q || { echo -e " ${RED}✗ Failed to pull images.${NC}"; echo "  Run 'docker compose pull' manually for details."; exit 1; }
+  echo -e " ${GREEN}✓${NC}"
+
+  printf "  Starting database..."
+  dc up -d postgres
+  for _ in $(seq 1 30); do
+    dc exec postgres pg_isready -U greppilot &>/dev/null && break || true
+    sleep 1
+  done
+  echo -e " ${GREEN}✓ Database ready${NC}"
+
+  printf "  Running migrations..."
+  dc run --rm api node dist/migrate.js
+  echo -e " ${GREEN}✓ Migrations applied${NC}"
+
+  dc up -d
+  echo -e "  ${GREEN}✓ All services started${NC}"
+
+  echo ""
+  echo -e "${GREEN}  Greppilot is running.${NC}"
+  echo -e "${GREEN}  Visit: $APP_URL${NC}"
+  echo ""
+}
+
+# ── start ─────────────────────────────────────────────────────────────────────
+
+cmd_start() {
+  require_install
+  echo -e "${CYAN}Starting Greppilot...${NC}"
+  dc up -d
+  APP_URL=$(grep "^APP_URL=" "$ENV_FILE" | cut -d= -f2-)
+  echo -e "${GREEN}✓ Services running — visit $APP_URL${NC}"
+}
+
+# ── stop ──────────────────────────────────────────────────────────────────────
+
+cmd_stop() {
+  require_install
+  echo -e "${CYAN}Stopping Greppilot...${NC}"
+  dc down
+  echo -e "${GREEN}✓ Services stopped${NC}"
+}
+
+# ── update ────────────────────────────────────────────────────────────────────
+
+cmd_update() {
+  require_install
+  echo -e "${CYAN}Updating Greppilot...${NC}"
+
+  printf "  Pulling latest images..."
+  dc pull -q || { echo -e " ${RED}✗ Failed to pull images.${NC}"; echo "  Run 'docker compose pull' manually for details."; exit 1; }
+  echo -e " ${GREEN}✓${NC}"
+
+  printf "  Applying migrations..."
+  dc run --rm api node dist/migrate.js
+  echo -e " ${GREEN}✓${NC}"
+
+  printf "  Restarting services..."
+  dc up -d
+  echo -e " ${GREEN}✓${NC}"
+
+  echo -e "${GREEN}✓ Update complete${NC}"
+}
+
+# ── help ──────────────────────────────────────────────────────────────────────
+
+cmd_help() {
+  echo ""
+  echo "Usage: greppilot <command>"
+  echo ""
+  echo "Commands:"
+  echo "  install   Set up Greppilot on this machine"
+  echo "  start     Start all services"
+  echo "  stop      Stop all services"
+  echo "  update    Pull latest images and restart"
+  echo ""
+}
+
+# ── dispatch ──────────────────────────────────────────────────────────────────
+
+case "${1:-help}" in
+  install) cmd_install ;;
+  start)   cmd_start ;;
+  stop)    cmd_stop ;;
+  update)  cmd_update ;;
+  --help|-h|help) cmd_help ;;
+  *)
+    echo -e "${RED}Unknown command: ${1}${NC}"
+    cmd_help
+    exit 1
+    ;;
+esac
