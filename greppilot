@@ -240,6 +240,18 @@ cmd_update() {
   require_install
   echo -e "${CYAN}Updating Greppilot...${NC}"
 
+  printf "  Updating CLI..."
+  SELF_PATH="$(command -v greppilot)"
+  CLI_URL="https://raw.githubusercontent.com/greppilot/cli/main/greppilot"
+  if curl -fsSL "$CLI_URL" -o "${SELF_PATH}.tmp" 2>/dev/null; then
+    chmod +x "${SELF_PATH}.tmp"
+    mv "${SELF_PATH}.tmp" "$SELF_PATH"
+    echo -e " ${GREEN}✓${NC}"
+  else
+    rm -f "${SELF_PATH}.tmp"
+    echo -e " ${YELLOW}skipped (could not reach update server)${NC}"
+  fi
+
   printf "  Refreshing compose config..."
   write_compose
   echo -e " ${GREEN}✓${NC}"
